@@ -52,6 +52,7 @@ DEFAULTS = {
     "paper": True,
     "blocked": [],
     "allow_options": False,
+    "risk_per_trade_pct": 1,
 }
 EPS = 1e-9
 
@@ -384,6 +385,110 @@ def write_orders(path, orders, result, cfg, source=""):
         fh.write("\n")
 
 
+# ---------------------------------------------------------------- one day trade
+
+def size_trade(trade, cfg, budget=None):
+    """Pure function: trader/trade.json + rules -> shares for ONE bracket order.
+
+    Shares are the smallest of: the risk per trade over the worst-case risk per
+    share (limit minus stop), the per-stock cap, the money left after the cash
+    buffer, and the max order. Whole shares only: Alpaca's bracket orders do
+    not take fractions or dollar amounts."""
+    budget = float(budget if budget is not None else (cfg.get("budget") or 0))
+    if budget <= 0:
+        raise SizeError("no budget: pass --budget or set \"budget\" in trader/config.json")
+    e, x = trade.get("entry") or {}, trade.get("exit")
+    sym = str(trade.get("symbol", "")).upper()
+    if not x:
+        raise SizeError("the trade has no exit: run trader-exit first (no stop, no size)")
+    st = e.get("status")
+    if st not in ("waiting", "not_ready") or e.get("trigger") is None:
+        raise SizeError("the entry is %s%s: there is no order to size. Make a new plan with trader-entry."
+                        % (st, (" (" + e["why"] + ")") if e.get("why") else ""))
+    if sym in {str(b).upper() for b in cfg.get("blocked") or []}:
+        raise SizeError("%s is on your blocked list" % sym)
+    limit, stop, target = float(e["limit"]), float(x["stop"]), float(x["target"])
+    rps = limit - stop
+    if rps <= 0:
+        raise SizeError("the stop must be under the entry")
+    risk_pct = float(cfg.get("risk_per_trade_pct", 1) or 0)
+    if not 0 < risk_pct <= 5:
+        raise SizeError("risk_per_trade_pct must be above 0 and at most 5")
+    risk_usd = budget * risk_pct / 100.0
+    if cfg.get("max_loss_per_trade_usd"):
+        risk_usd = min(risk_usd, float(cfg["max_loss_per_trade_usd"]))
+    investable = budget * (1 - float(cfg.get("cash_buffer_pct", 10)) / 100.0)
+    caps = {"risk": risk_usd / rps,
+            "position cap": budget * float(cfg.get("max_position_pct", 25)) / 100.0 / limit,
+            "cash after the buffer": investable / limit}
+    if cfg.get("max_order_usd"):
+        caps["max order"] = float(cfg["max_order_usd"]) / limit
+    binding = min(caps, key=lambda k: caps[k])
+    shares = int(math.floor(caps[binding] + EPS))
+    if shares < 1:
+        raise SizeError("not even one share fits: %s allows %.2f shares at %s. Use a closer stop, "
+                        "a cheaper stock, or more budget." % (binding, caps[binding], money(limit)))
+    warnings = []
+    bt = trade.get("backtest")
+    if not bt:
+        warnings.append("not replayed: run trader-timemachine first to see what these rules did before")
+    else:
+        if bt.get("rules") and bt["rules"].get("exit") != x.get("rules"):
+            warnings.append("the replay was for different exit rules; run trader-timemachine again")
+        if bt.get("avg_r") is not None and bt["avg_r"] <= 0:
+            warnings.append("in the replay these rules averaged %+.2fR a trade over %d trades (lost money)"
+                            % (bt["avg_r"], bt.get("trades", 0)))
+        if (bt.get("trades") or 0) < 30:
+            warnings.append("the replay has only %d trades, too few to mean much" % (bt.get("trades") or 0))
+    return {"symbol": sym, "budget": budget, "risk_per_trade_pct": risk_pct, "risk_usd": round(risk_usd, 2),
+            "trigger": e["trigger"], "limit": limit, "stop": stop, "target": target,
+            "worst_risk_per_share": round(rps, 2), "shares": shares, "binding": binding,
+            "max_shares": {k: round(v, 2) for k, v in caps.items()},
+            "cost_at_limit": round(shares * limit, 2), "loss_at_stop": round(shares * rps, 2),
+            "gain_at_target": round(shares * (target - float(e["trigger"])), 2),
+            "flat_by": x["flat_by"], "order_type": e.get("order_type", "stop_limit"),
+            "session_date": trade.get("session_date"), "warnings": warnings}
+
+
+def trade_order(t):
+    """The one bracket order, place_stock_order arguments (numbers as strings)."""
+    o = {"symbol": t["symbol"], "side": "buy", "qty": str(t["shares"]), "type": t["order_type"],
+         "time_in_force": "day"}
+    if t["order_type"] == "stop_limit":
+        o["stop_price"] = _num(t["trigger"])
+    o["limit_price"] = _num(t["limit"])
+    o.update({"order_class": "bracket", "take_profit_limit_price": _num(t["target"]),
+              "stop_loss_stop_price": _num(t["stop"]),
+              "why": "day trade: risk %s (%s%% of %s) to the stop; flat by %s New York"
+                     % (money(t["loss_at_stop"]), _num(t["risk_per_trade_pct"]), money(t["budget"]), t["flat_by"]),
+              "plan": {"day_trade": True, "session_date": t["session_date"], "flat_by": t["flat_by"],
+                       "risk_usd": t["risk_usd"], "loss_at_stop": t["loss_at_stop"]}})
+    return o
+
+
+def trade_report(t, o):
+    lines = ["One day trade: %s, session %s" % (t["symbol"], t["session_date"]),
+             "Budget %s, risk %s%% = %s a trade. Worst-case risk %s a share (limit %s minus stop %s)."
+             % (money(t["budget"]), _num(t["risk_per_trade_pct"]), money(t["risk_usd"]),
+                money(t["worst_risk_per_share"]), money(t["limit"]), money(t["stop"])), ""]
+    for k, v in t["max_shares"].items():
+        lines.append("  %-22s allows %10.2f shares%s" % (k, v, "  <- the limit that binds" if k == t["binding"] else ""))
+    lines += ["",
+              "BUY %d shares of %s: %s at %s, paying at most %s (cost up to %s)" % (
+                  t["shares"], t["symbol"], "triggers" if t["order_type"] == "stop_limit" else "limit",
+                  money(t["trigger"]), money(t["limit"]), money(t["cost_at_limit"])),
+              "  stop %s: lose about %s    target %s: make about %s    flat by %s" % (
+                  money(t["stop"]), money(t["loss_at_stop"]), money(t["target"]), money(t["gain_at_target"]),
+                  t["flat_by"])]
+    for w in t["warnings"]:
+        lines.append("WARNING: " + w)
+    lines += ["", "Proposed order (place_stock_order arguments, nothing has been placed):",
+              "  " + json.dumps({k: v for k, v in o.items() if k not in ("why", "plan")}),
+              "", "A gap through the stop can lose more than the plan. Next: trader-risk, then trader-broker "
+              "asks you yes or no.", "Education and tooling, not financial advice."]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- report
 
 def money(x):
@@ -448,7 +553,24 @@ def main(argv=None):
     ap.add_argument("--write", nargs="?", const="trader/orders.json", metavar="PATH",
                     help="write the proposed orders (default trader/orders.json)")
     ap.add_argument("--json", action="store_true", help="print JSON instead of the table")
+    ap.add_argument("--trade", nargs="?", const="trader/trade.json", metavar="PATH",
+                    help="size ONE day trade from trader/trade.json (risk-based, whole shares, bracket order)")
     a = ap.parse_args(argv)
+    if a.trade:
+        try:
+            cfg = load_config(a.config)
+            trade = read_json(a.trade, "trade (run trader-entry, trader-exit, trader-timemachine)")
+            t = size_trade(trade, cfg, a.budget)
+            o = trade_order(t)
+            if a.write:
+                write_orders(a.write, [o], t, cfg, "day trade plan %s" % a.trade)
+        except SizeError as e:
+            print("size.py: %s" % e, file=sys.stderr)
+            return 1
+        print(json.dumps({"trade": t, "orders": [o]}, indent=2) if a.json else trade_report(t, o))
+        if a.write and not a.json:
+            print("Wrote 1 proposed order to %s" % a.write)
+        return 0
     try:
         cfg = load_config(a.config)
         source = ""

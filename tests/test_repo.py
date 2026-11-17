@@ -7,12 +7,13 @@ from _load import ROOT
 
 SKILLS = ["trader-copycat", "trader-news", "trader-budget", "trader-pelosi", "trader-analyst",
           "trader-screener", "trader-risk", "trader-broker", "trader-tax", "trader-alerts",
-          "trader-rebalance"]
-ABOUT = ("11 Claude skills that copy the investors you trust, watch the news and Congress, size every "
-         "trade to your budget, and never place an order without your yes.")
+          "trader-rebalance", "trader-scanner", "trader-entry", "trader-exit", "trader-timemachine"]
+ABOUT = ("15 Claude skills that copy the investors you trust, watch the news and Congress, plan and replay "
+         "a day trade, size every trade to your budget, and never place an order without your yes.")
 # skills that can lead to an order carry the safety block
 ORDER_PATH = ["trader-copycat", "trader-budget", "trader-pelosi", "trader-risk", "trader-broker",
-              "trader-tax", "trader-alerts", "trader-rebalance"]
+              "trader-tax", "trader-alerts", "trader-rebalance", "trader-scanner", "trader-entry",
+              "trader-exit", "trader-timemachine"]
 
 
 def frontmatter(path):
@@ -31,7 +32,7 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_fifteen_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))

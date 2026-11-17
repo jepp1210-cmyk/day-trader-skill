@@ -143,6 +143,31 @@ The user replies "yes". Claude records it, calls `place_stock_order`, and the
 card reads "Claude wants to use Place stock order" with that JSON and two
 buttons: Allow once, Deny. Allow once sends it to the paper account.
 
+## A day trade: the bracket and flat by the close
+
+A day trade from `size.py --trade` is one bracket order: the entry, a
+take-profit and a stop-loss, all on one ticket, with one yes. The ticket
+says all three legs and the flat-by time:
+
+```
+BUY 2 shares of AMD, stop $511.86, limit $512.37, good for today; bracket:
+take profit at $534.60, stop loss at $500.49; flat by 15:55 New York
+```
+
+When trader-alerts rings the flat-by time and the position is still open:
+
+1. Ask: "Close your AMD day trade now? Reply yes or no." One trade per question.
+2. `ticket.py flatten --symbol AMD --reply "<the reply, word for word>"`. Only
+   "Recorded your yes" counts.
+3. Then, each through its own Allow once card: `get_orders` to find the
+   bracket's open legs, `cancel_order_by_id` for each, and `close_position`
+   for that one symbol. Never `close_all_positions` or `cancel_all_orders`.
+4. Record the sale with `ticket.py fill --side sell`.
+
+If the user says no, nothing is closed: the stop and target legs stay at the
+broker. A day order's legs may not outlive the session; check the open
+orders in the paper account after the close.
+
 ## What it never does
 
 - Never places an order without all three gates, and never two orders on one yes.

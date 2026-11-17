@@ -55,6 +55,9 @@ batch that is fine order by order but breaks a rule together is caught.
 | short | a sell of more than you hold (`allow_short` false) |
 | duplicate | the same symbol and side twice in one batch, or already placed today |
 | daily limit | more than `max_orders_per_day` placed today |
+| bracket | a bracket with a dollar amount or a fractional qty, a sell bracket, a stop not under the entry or a target not over it |
+| risk | a bracket's loss from the limit to the stop is over `risk_per_trade_pct` of the account (default 1) or `max_loss_per_trade_usd` |
+| stale | a day trade planned for another session than today |
 
 Warnings do not block, but say them to the user: a LIVE account, a number
 sent as a number instead of a string, an advanced (bracket) order.

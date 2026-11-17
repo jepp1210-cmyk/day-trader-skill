@@ -1,6 +1,6 @@
 # The Trader skill
 
-11 Claude skills that copy the investors you trust, watch the news and Congress, size every trade to your budget, and never place an order without your yes.
+15 Claude skills that copy the investors you trust, watch the news and Congress, plan and replay a day trade, size every trade to your budget, and never place an order without your yes.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read public
 data: SEC EDGAR, the House Clerk, news feeds.
@@ -10,6 +10,10 @@ filing. Another monitors breaking news on every stock you hold. One manages your
 budget: every dollar sized, a cash buffer kept, no stock over your cap. And the
 craziest one is the Pelosi skill: it reads the stock trades members of Congress
 disclose, the minute the filing posts.
+
+Four more take one day trade from idea to order: scan your watchlist for
+movers, write the entry and the exit down before you buy, then send those
+exact rules back in time over the last 60 sessions to see what they did.
 
 And no trade goes through until you say yes. Nothing in this pack can place an
 order on its own. Paper trading is the default.
@@ -50,7 +54,7 @@ script to identify itself: put your name and email in `trader/config.json`
 (`"sec_user_agent": "Your Name you@example.com"`) or in the `SEC_USER_AGENT`
 environment variable.
 
-## The eleven
+## The fifteen
 
 | command | job | what it does |
 | --- | --- | --- |
@@ -65,6 +69,10 @@ environment variable.
 | `/trader-tax` | Tax Optimizer | Tracks cost-basis lots, gains and losses, tax-loss harvesting candidates and wash sales. |
 | `/trader-alerts` | Price Alerts | Rings when a price target, a stop or the opening bell hits, with the real NYSE calendar. |
 | `/trader-rebalance` | Rebalancer | Brings the portfolio back to its target weights when it drifts past your band. |
+| `/trader-scanner` | Day-Trade Scanner | Ranks today's movers in your watchlist by gap and relative volume, with the ATR and liquidity rules each one passes or fails. |
+| `/trader-entry` | Entry Planner | Writes one entry rule for today: an opening range breakout, a break of yesterday's high or your level, with the trigger, the limit and an expiry time. |
+| `/trader-exit` | Exit Planner | Adds the stop, the target in R and the flat-by time before the close, and the risk per share the size comes from. |
+| `/trader-timemachine` | Time Machine | Replays the exact entry and exit rules on the stock's past sessions, 5-minute bar by bar: win rate, average R, drawdown, losing streak. |
 
 ## How to use it
 
@@ -72,10 +80,12 @@ Everything lands in a `trader/` folder in your project, and each skill reads
 what the last one wrote:
 
 ```
-copycat -> budget -> risk -> broker            (copy an investor)
-news / pelosi / alerts                          (watch, on a schedule)
-analyst -> screener -> budget -> risk -> broker (pick your own)
-rebalance / tax -> risk -> broker               (maintain)
+copycat -> budget -> risk -> broker                                           (copy an investor)
+analyst -> screener -> budget -> risk -> broker                               (pick your own)
+rebalance / tax -> risk -> broker                                             (maintain)
+scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
+alerts: stop, target, flat by the close                                       (while it is open)
+news / analyst / pelosi                                                       (on a schedule)
 ```
 
 An example: copying Berkshire Hathaway with $5,000.
@@ -104,6 +114,27 @@ An example: copying Berkshire Hathaway with $5,000.
 6. Every quarter: **`/trader-copycat`** diffs the new 13F against the last one,
    and **`/trader-rebalance`** proposes the trades to match it again.
 
+Another example: one day trade on AMD, 2026-11-17.
+
+1. **`/trader-scanner`** on your watchlist. With a 0.4 % gap and 0.9x
+   relative volume, AMD ranks first: +1.45 % gap, 0.96x volume, ATR 9.5 % of
+   the price.
+2. **`/trader-news`** on AMD: is the gap on news?
+3. **`/trader-entry`** at 10:00, 15-minute opening range breakout: the range
+   was $500.50 to $511.85, so buy if it trades at $511.86, paying at most
+   $512.37, until 11:30.
+4. **`/trader-exit`**: stop $500.49 under the range, target $534.60 (2R),
+   flat by 15:55.
+5. **`/trader-timemachine`**: the same rules on the 21 sessions before it
+   made 13 trades, 6 wins, average -0.08R after costs. Too few trades to mean
+   much, and they lost money. You hear that before you size anything.
+6. **`/trader-budget --trade`** with $5,000 and 1 % risk: 2 shares (the 25 %
+   cap binds), one bracket order, about $24 lost at the stop.
+7. **`/trader-risk`**, then **`/trader-broker`**: one ticket, one yes.
+8. **`/trader-alerts`** `add --from-trade`: it rings at the stop, at the
+   target, and at 15:55 to close the trade, win or lose. AMD never reached
+   $511.86 before 11:30 that day, so the plan simply expired: no trade.
+
 ## The tools
 
 All standard-library Python. The data tools read public endpoints and are
@@ -124,6 +155,12 @@ python3 trader-broker/ticket.py show                                   # the tic
 python3 trader-tax/lots.py harvest --min-loss 100                      # with wash-sale checks
 python3 trader-alerts/alerts.py clock                                  # NYSE open or closed
 python3 trader-rebalance/rebalance.py --band 5                         # the drift table
+python3 trader-scanner/scan.py --tickers AAPL AMD NVDA TSLA --write    # -> trader/scan.json
+python3 trader-entry/entry.py --from-scan --setup orb --write          # -> trader/trade.json
+python3 trader-exit/exit.py --stop range --r 2 --write                 # stop, target, flat by
+python3 trader-timemachine/backtest.py --write                         # replay the rules
+python3 trader-budget/size.py --trade --write                          # one bracket order
+python3 trader-alerts/alerts.py add --from-trade                       # stop, target, flat by
 ```
 
 ```bash
@@ -165,6 +202,14 @@ filed in. It has no access to anything that is not public.
 RSS and Yahoo Finance's chart endpoint (unofficial, and it can change). Check
 anything that matters against your broker before you act on it.
 
+**Day trading is risky.** Most people who day trade lose money, and costs
+and slippage add up fast. A stop is a plan, not a guarantee: a gap or a halt
+can fill far worse. In the US, a margin account under $25,000 that makes four
+or more day trades in five business days is flagged as a pattern day trader;
+a cash account can only trade with settled cash. A replay by
+`/trader-timemachine` describes what the rules did on past bars, with
+conservative fills; it does not predict the next trade.
+
 **Taxes.** `/trader-tax` does the arithmetic on lots and wash-sale windows. It
 is not tax advice.
 
@@ -182,6 +227,10 @@ trader-broker/     SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-tax/        SKILL.md, lots.py, portfolio.example.json
 trader-alerts/     SKILL.md, alerts.py, alerts.example.json
 trader-rebalance/  SKILL.md, rebalance.py
+trader-scanner/    SKILL.md, scan.py
+trader-entry/      SKILL.md, entry.py
+trader-exit/       SKILL.md, exit.py
+trader-timemachine/ SKILL.md, backtest.py (runs trader-entry and trader-exit)
 tests/             unittest suite + offline fixtures
 ```
 

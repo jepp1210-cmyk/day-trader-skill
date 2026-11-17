@@ -1,6 +1,6 @@
 {
   "name": "trader-skill",
-  "description": "11 Claude skills that copy the investors you trust, watch the news and Congress, size every trade to your budget, and never place an order without your yes.",
+  "description": "15 Claude skills that copy the investors you trust, watch the news and Congress, plan and replay a day trade, size every trade to your budget, and never place an order without your yes.",
   "version": "1.0.0",
   "author": {
     "name": "Jake Schincariol",
@@ -16,7 +16,9 @@
     "13f",
     "stock-market",
     "congress-trades",
-    "portfolio"
+    "portfolio",
+    "day-trading",
+    "backtesting"
   ],
   "skills": "./"
 }

@@ -9,7 +9,8 @@ description: >-
   writes trader/prices.json for the other skills. Use when the user says
   "alert me when", "tell me if AAPL hits", "set a stop", "price target",
   "watch my stocks", "is the market open", "when does the market open",
-  "get me prices", or to refresh prices before sizing, risk or tax.
+  "get me prices", "flat by the close", "remind me to close my day trade",
+  or to refresh prices before sizing, risk or tax.
 argument-hint: "[ticker] [price]"
 ---
 
@@ -29,6 +30,8 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol AAPL --above 350
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol BAC --stop 50 --note "my stop"
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol KO --pct 3
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol AMD --flat-by 5        # 5 minutes before the close
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --from-trade                    # a day trade's stop, target, flat by
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                         # exit 0 = something rang
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" list
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset aapl-above-350
@@ -50,6 +53,14 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset aapl-above-350
 | `below` / `stop` | price at or below `price` | same |
 | `pct_move` | moved `pct` percent from the previous close (or `ref`), optional `direction` up or down | once per day at most |
 | `opening_bell` | the NYSE is open | once per trading day |
+| `flat_by` | New York time is at or past `time` (15:55) or `minutes_before_close`, which follows 1:00 p.m. early closes (a fixed time at or after an early close rings 5 minutes before it) | once per trading day |
+
+A rule with `"date": "2026-11-17"` only counts on that session. `add
+--from-trade` reads `trader/trade.json` and adds three such rules for the
+day trade: its stop, its target and flat by the close. While the trade is
+open, run `check` every 5 minutes in market hours (a Claude scheduled task
+or cron); the flat-by alert is the reminder to close it, through
+trader-broker and the user's yes.
 
 ## Quotes
 

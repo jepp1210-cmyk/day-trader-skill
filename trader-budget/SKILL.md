@@ -9,7 +9,9 @@ description: >-
   place_stock_order (notional as a string). Nothing is placed. Use when the
   user says "I have $5,000", "size my trades", "how much of each should I
   buy", "manage my budget", "split my money", "keep 10% in cash", "no stock
-  over 25%", "set my rules", or after /trader-copycat writes targets.
+  over 25%", "set my rules", "how many shares for this day trade", "size
+  the trade to my risk", or after /trader-copycat writes targets or
+  /trader-timemachine replays a day trade.
 argument-hint: "[budget in dollars]"
 ---
 
@@ -26,6 +28,7 @@ python3 "${CLAUDE_SKILL_DIR}/size.py"                       # trader/targets.jso
 python3 "${CLAUDE_SKILL_DIR}/size.py" --budget 5000 --write # write trader/orders.json
 python3 "${CLAUDE_SKILL_DIR}/size.py" --whole-shares --prices trader/prices.json
 python3 "${CLAUDE_SKILL_DIR}/size.py" --weights AAPL=22.04,AXP=17.14,GOOGL=12.62 --json
+python3 "${CLAUDE_SKILL_DIR}/size.py" --trade --write          # ONE day trade from trader/trade.json
 ```
 
 ## What it reads and writes
@@ -93,6 +96,36 @@ The first order it writes is
 `{"symbol": "AAPL", "side": "buy", "notional": "1250", "type": "market", "time_in_force": "day"}`.
 Keep the weights to two decimals or more: weights already rounded to one
 decimal (30.7 / 23.9 / ...) can move a slice by a dollar.
+
+## One day trade: `--trade`
+
+For the one-trade flow (scanner, news, entry, exit, timemachine, budget,
+risk, broker) the size comes from the risk, not from weights:
+
+- **risk_per_trade_pct** (default 1, at most 5): the most one trade may lose
+  at its stop, as a percent of the budget. Optional **max_loss_per_trade_usd**
+  caps it in dollars.
+- Shares are the smallest of: that risk over the worst-case risk per share
+  (the limit minus the stop), the `max_position_pct` cap, the money left after
+  the cash buffer, and `max_order_usd`. It says which one binds.
+- Whole shares only, and one bracket order: the entry (stop-limit for a
+  breakout, limit for a pullback), a take-profit at the target and a
+  stop-loss at the stop, `time_in_force` day. The `plan` block carries the
+  session date and the flat-by time for trader-risk and trader-alerts.
+- It refuses a trade with no exit, or an entry that is not WAITING (already
+  triggered, missed or expired). It warns when the trade was not replayed by
+  trader-timemachine, when the replay lost money, and when the replay has
+  under 30 trades. Say every warning to the user.
+
+AMD on 2026-11-17 with a $5,000 budget and 1 % risk ($50): worst-case risk
+$11.88 a share allows 4.21 shares, but the 25 % cap allows 2.44, so the cap
+binds: **BUY 2 shares**, trigger $511.86, limit $512.37, take profit $534.60,
+stop loss $500.49, about $23.76 lost at the stop, flat by 15:55.
+
+Alpaca's documentation describes a bracket as an entry plus a take-profit
+and a stop-loss. Check on the paper account that it accepts a stop-limit
+entry for a bracket before relying on it; if it is refused, record the
+result as failed and use a limit entry once the trigger has traded instead.
 
 ## Rules
 

@@ -15,6 +15,8 @@ things around the one moment that matters, your yes:
   result    records what happened after the Allow once / Deny card:
             placed (with the broker's order id), denied, or failed.
   fill      adds a filled order to trader/portfolio.json as a tax lot.
+  flatten   records your explicit yes to close ONE day trade at the flat-by
+            time (cancel its bracket legs, then close the position).
   log       prints today's decisions.
 
     python3 ticket.py show                    # every order, READY or not
@@ -140,7 +142,13 @@ def plain(order):
     else:
         how = "%s order" % typ.replace("_", " ")
     tif = TIF_WORDS.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))
-    return "%s %s, %s, %s" % (side, what, how, tif)
+    text = "%s %s, %s, %s" % (side, what, how, tif)
+    if order.get("order_class") == "bracket":
+        text += "; bracket: take profit at %s, stop loss at %s" % (
+            _money(order.get("take_profit_limit_price")), _money(order.get("stop_loss_stop_price")))
+        if (order.get("plan") or {}).get("flat_by"):
+            text += "; flat by %s New York" % order["plan"]["flat_by"]
+    return text
 
 
 def amount_numbers(order):
@@ -413,6 +421,28 @@ def cmd_result(a):
     return 0
 
 
+def cmd_flatten(a):
+    """Your yes to close one day trade. Claude then cancels the bracket's open
+    legs and closes the position, each through its own Allow once card."""
+    state = load_state(a.state)
+    today = a.today or datetime.date.today().isoformat()
+    sym = a.symbol.upper()
+    ok, why = parse_yes(a.reply, {"symbol": sym, "side": "sell"})
+    if not ok:
+        print("Not recorded: %s. Ask again: \"Close your %s day trade now? Reply yes or no.\"" % (why, sym))
+        return 1
+    rec = {"at": now_iso(), "date": today, "symbol": sym, "side": "sell",
+           "plain": "CLOSE the %s day trade (cancel its bracket legs, close the position)" % sym,
+           "status": "approved_flatten", "reply": a.reply}
+    state.setdefault("orders", []).append(rec)
+    write_json(a.state, state)
+    print("Recorded your yes to close the %s day trade." % sym)
+    print("Now: get_orders for %s, cancel_order_by_id for each open leg of its bracket, then close_position "
+          "for %s. Each call shows Claude's Allow once / Deny card." % (sym, sym))
+    print("Then record the sale: ticket.py fill --symbol %s --side sell --qty Q --price P" % sym)
+    return 0
+
+
 def cmd_fill(a):
     cfg = read_json(a.config, "config", required=False) or {}
     date = a.date or datetime.date.today().isoformat()
@@ -431,7 +461,8 @@ def cmd_log(a):
         return 1
     for r in rows:
         extra = (" id " + r["broker_order_id"]) if r.get("broker_order_id") else ""
-        reply = (' reply "%s"' % r["reply"]) if r.get("reply") and r["status"] in ("approved", "declined") else ""
+        reply = (' reply "%s"' % r["reply"]) if r.get("reply") and r["status"] in (
+            "approved", "declined", "approved_flatten") else ""
         print("%s  #%s %-9s %s%s%s" % (r.get("at"), r.get("index"), r.get("status"), r.get("plain"), reply, extra))
     placed = sum(1 for r in rows if r.get("status") == "placed")
     print("%d placed%s." % (placed, "" if a.all else " today"))
@@ -482,13 +513,18 @@ def main(argv=None):
     p.add_argument("--state", default="trader/state/broker.json")
     p.add_argument("--today")
     p.add_argument("--all", action="store_true")
+    p = sub.add_parser("flatten", help="record your yes to close one day trade")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--reply", required=True, help="the user's reply, word for word")
+    p.add_argument("--state", default="trader/state/broker.json")
+    p.add_argument("--today")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
         return {"show": cmd_show, "approve": cmd_approve, "decline": cmd_decline, "result": cmd_result,
-                "fill": cmd_fill, "log": cmd_log}[a.cmd](a)
+                "fill": cmd_fill, "log": cmd_log, "flatten": cmd_flatten}[a.cmd](a)
     except TicketError as e:
         print("ticket.py: %s" % e, file=sys.stderr)
         return 1

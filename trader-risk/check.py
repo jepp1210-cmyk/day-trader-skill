@@ -44,6 +44,7 @@ DEFAULTS = {
     "budget": None, "cash_buffer_pct": 10, "max_position_pct": 25, "max_order_usd": 2000,
     "min_order_usd": 5, "max_orders_per_day": 10, "paper": True, "blocked": [],
     "allow_options": False, "allow_margin": False, "allow_short": False,
+    "risk_per_trade_pct": 1, "max_loss_per_trade_usd": None,
 }
 ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
@@ -258,6 +259,10 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None):
                 reasons.append("short: selling more %s than you hold (%s shares); short selling is off"
                                % (sym, _num(held)))
 
+        # bracket orders (one day trade from trader-budget --trade)
+        if o.get("order_class") == "bracket":
+            reasons += bracket_reasons(o, side, c, total, today)
+
         # duplicates and the daily limit
         key = (sym, side)
         if key in seen:
@@ -302,6 +307,49 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None):
         "warnings": top_warn,
         "cash_after": round(acct["cash"], 2),
     }
+
+
+def bracket_reasons(o, side, c, total, today):
+    """A bracket buys with a take-profit above and a stop-loss below. The loss
+    at the stop is measured from the limit price (the worst fill)."""
+    out = []
+    qty, notional = o.get("qty"), o.get("notional")
+    if notional is not None:
+        out.append("bracket: a bracket order needs a whole-share qty, not a dollar amount")
+    q = _f(qty)
+    if q is not None and abs(q - round(q)) > 1e-9:
+        out.append("bracket: %s is a fraction; bracket orders take whole shares" % qty)
+    if side != "buy":
+        out.append("bracket: only buy brackets are supported (a sell bracket is a short)")
+        return out
+    tp, sl = _f(o.get("take_profit_limit_price")), _f(o.get("stop_loss_stop_price"))
+    entry = _f(o.get("limit_price")) or _f(o.get("stop_price"))
+    if tp is None or sl is None:
+        out.append("bracket: needs both take_profit_limit_price and stop_loss_stop_price")
+        return out
+    if entry is None:
+        out.append("bracket: needs a limit_price so the loss at the stop is known")
+        return out
+    if not sl < entry < tp:
+        out.append("bracket: the stop %s must be under the entry %s and the target %s over it"
+                   % (money(sl), money(entry), money(tp)))
+        return out
+    if q:
+        loss = q * (entry - sl)
+        limits = []
+        if c.get("risk_per_trade_pct") and total > 0:
+            limits.append((total * float(c["risk_per_trade_pct"]) / 100.0,
+                           "%s%% of the %s account" % (_pct(c["risk_per_trade_pct"]), money(total))))
+        if c.get("max_loss_per_trade_usd"):
+            limits.append((float(c["max_loss_per_trade_usd"]), "your max loss per trade"))
+        for lim, label in limits:
+            if loss > lim + CENT:
+                out.append("risk: %s shares lose %s from the limit to the stop, over %s (%s)"
+                           % (_num(q), money(loss), money(lim), label))
+    plan = o.get("plan") or {}
+    if plan.get("day_trade") and plan.get("session_date") and plan["session_date"] != today:
+        out.append("stale: this day trade was planned for %s, not today (%s)" % (plan["session_date"], today))
+    return out
 
 
 def _pct(x):

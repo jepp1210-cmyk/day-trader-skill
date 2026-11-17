@@ -8,6 +8,8 @@
     python3 alerts.py add --symbol BAC --stop 50
     python3 alerts.py add --symbol KO --pct 3
     python3 alerts.py add --opening-bell
+    python3 alerts.py add --symbol AMD --flat-by 5   # 5 minutes before the close
+    python3 alerts.py add --from-trade               # stop, target, flat by from trader/trade.json
     python3 alerts.py check                          # rings what hit, once; exit 1 if nothing rang
     python3 alerts.py list
     python3 alerts.py reset aapl-above-350
@@ -18,6 +20,11 @@ Rule types:
   pct_move      the price moved "pct" percent or more from the previous close
                 (or from "ref" if you give one); "direction": "up" or "down"
   opening_bell  the NYSE opened today (rings once per trading day)
+  flat_by       a day trade must be closed: rings once at "time" (HH:MM New
+                York) or "minutes_before_close" (early closes included)
+
+A rule with "date": "YYYY-MM-DD" only counts on that session (the day-trade
+rules from add --from-trade carry one).
 
 An above / below alert rings ONCE and then stays quiet until you reset it,
 unless the rule has "rearm": true (it re-arms when the price crosses back).
@@ -308,7 +315,7 @@ def _read(path, default):
 
 # ---------------------------------------------------------------- rules
 
-PRICE_TYPES = {"above", "below", "stop", "target", "pct_move", "opening_bell"}
+PRICE_TYPES = {"above", "below", "stop", "target", "pct_move", "opening_bell", "flat_by"}
 
 
 def validate(rule):
@@ -321,6 +328,28 @@ def validate(rule):
         raise AlertError("rule %s needs a numeric price" % rule.get("id"))
     if t == "pct_move" and not isinstance(rule.get("pct"), (int, float)):
         raise AlertError("rule %s needs a numeric pct" % rule.get("id"))
+    if t == "flat_by":
+        if rule.get("time") is None and not isinstance(rule.get("minutes_before_close"), int):
+            raise AlertError("rule %s needs a time (HH:MM) or minutes_before_close" % rule.get("id"))
+        if rule.get("time") is not None:
+            try:
+                h, m = str(rule["time"]).split(":")
+                datetime.time(int(h), int(m))
+            except ValueError:
+                raise AlertError("rule %s: time must look like 15:55" % rule.get("id"))
+
+
+def flat_time(rule, status):
+    """The HH:MM a flat_by rule rings today, or None if the NYSE is shut."""
+    if not status.get("closes"):
+        return None
+    c = datetime.datetime.strptime(status["date"] + " " + status["closes"], "%Y-%m-%d %H:%M")
+    if rule.get("minutes_before_close") is not None:
+        return (c - datetime.timedelta(minutes=int(rule["minutes_before_close"]))).strftime("%H:%M")
+    t = "%02d:%02d" % tuple(int(x) for x in str(rule["time"]).split(":"))
+    if t >= status["closes"]:  # a 15:55 rule on a 1:00 p.m. early close rings at 12:55
+        return (c - datetime.timedelta(minutes=5)).strftime("%H:%M")
+    return t
 
 
 def evaluate(rules, quotes, status, state, now_utc):
@@ -333,6 +362,19 @@ def evaluate(rules, quotes, status, state, now_utc):
         validate(r)
         rid = r.get("id") or "%s-%s" % (r.get("symbol", "market"), r["type"])
         typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
+        if r.get("date") and r["date"] != today:
+            continue
+        if typ == "flat_by":
+            ft = flat_time(r, status)
+            now_t = status["now_new_york"][11:16]
+            if ft and now_t >= ft and rung.get(rid, "")[:10] != today:
+                sym = str(r.get("symbol") or "").upper()
+                rings.append({"id": rid, "symbol": sym, "message": (
+                    "Flat by the close: %sit is %s New York, past your %s flat-by time (the NYSE closes at %s). "
+                    "Close the day trade, win or lose: trader-broker, with your yes."
+                    % ((sym + " ") if sym else "", now_t, ft, status["closes"]))})
+                rung[rid] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            continue
         if typ == "opening_bell":
             if status["open"] and rung.get(rid, "")[:10] != today:
                 rings.append({"id": rid, "symbol": "", "message": "Opening bell: the NYSE is open (%s New York)%s."
@@ -447,7 +489,9 @@ def cmd_check(a):
     rules = doc["rules"]
     now = parse_now(a.now)
     status = market_status(now)
-    syms = _dedupe([str(r.get("symbol", "")).upper() for r in rules if r.get("type") != "opening_bell"])
+    syms = _dedupe([str(r.get("symbol", "")).upper() for r in rules
+                    if r.get("type") not in ("opening_bell", "flat_by")
+                    and (not r.get("date") or r["date"] == status["date"])])
     quotes, errors = (get_quotes(syms, a.source, a.offline) if syms else ({}, []))
     state = _read(a.state, {})
     rings, state = evaluate(rules, quotes, status, state, now)
@@ -473,9 +517,41 @@ def cmd_check(a):
     return 0 if rings else 1
 
 
+def trade_rules(trade):
+    """The three rules for one day trade: its stop, its target, flat by the close."""
+    x = trade.get("exit") or {}
+    sym = str(trade.get("symbol", "")).upper()
+    if not sym or not x.get("stop") or not x.get("target"):
+        raise AlertError("the trade has no exit: run trader-exit first")
+    d = trade.get("session_date")
+    low = sym.lower()
+    mins = int((x.get("rules") or {}).get("flat_minutes", 5))
+    return [{"id": "%s-daytrade-stop" % low, "symbol": sym, "type": "stop", "price": x["stop"], "date": d,
+             "note": "day trade stop"},
+            {"id": "%s-daytrade-target" % low, "symbol": sym, "type": "target", "price": x["target"], "date": d,
+             "note": "day trade target"},
+            {"id": "%s-flat-by" % low, "symbol": sym, "type": "flat_by", "minutes_before_close": mins, "date": d,
+             "note": "day trade: flat by the close"}]
+
+
 def cmd_add(a):
     doc = _read(a.rules, {"rules": []})
     doc.setdefault("rules", [])
+    if a.from_trade:
+        trade = _read(a.from_trade, None)
+        if not trade:
+            raise AlertError("no trade at %s (run trader-entry and trader-exit)" % a.from_trade)
+        new = trade_rules(trade)
+        ids = {r["id"] for r in new}
+        doc["rules"] = [r for r in doc["rules"] if r.get("id") not in ids] + new
+        for r in new:
+            validate(r)
+        _write(a.rules, doc)
+        for r in new:
+            print("Added %s: %s" % (r["id"], json.dumps(r)))
+        print("These rules only count on %s. An alert is information: closing the trade still takes your yes."
+              % trade.get("session_date"))
+        return 0
     if a.opening_bell:
         rule = {"id": a.id or "opening-bell", "type": "opening_bell"}
     else:
@@ -492,10 +568,20 @@ def cmd_add(a):
             rule = {"type": "pct_move", "pct": a.pct}
             if a.direction:
                 rule["direction"] = a.direction
+        elif a.flat_by is not None:
+            if ":" in a.flat_by:
+                rule = {"type": "flat_by", "time": a.flat_by}
+            else:
+                try:
+                    rule = {"type": "flat_by", "minutes_before_close": int(a.flat_by)}
+                except ValueError:
+                    raise AlertError("--flat-by wants minutes before the close (5) or a time (15:55)")
         else:
-            raise AlertError("give one of --above, --below, --stop or --pct")
-        val = rule.get("price", rule.get("pct"))
-        rule = dict({"id": a.id or ("%s-%s-%s" % (sym.lower(), rule["type"], _n(val)))}, symbol=sym, **rule)
+            raise AlertError("give one of --above, --below, --stop, --pct or --flat-by")
+        val = rule.get("price", rule.get("pct", rule.get("time", rule.get("minutes_before_close"))))
+        default_id = ("%s-flat-by" % sym.lower() if rule["type"] == "flat_by"
+                      else "%s-%s-%s" % (sym.lower(), rule["type"], _n(val)))
+        rule = dict({"id": a.id or default_id}, symbol=sym, **rule)
         if a.rearm:
             rule["rearm"] = True
         if a.note:
@@ -570,6 +656,9 @@ def main(argv=None):
     g.add_argument("--stop", type=float)
     g.add_argument("--pct", type=float)
     g.add_argument("--opening-bell", action="store_true")
+    g.add_argument("--flat-by", metavar="MIN|HH:MM", help="minutes before the close, or a New York time")
+    g.add_argument("--from-trade", nargs="?", const="trader/trade.json", metavar="PATH",
+                   help="add the day trade's stop, target and flat-by rules")
     p.add_argument("--direction", choices=["up", "down"])
     p.add_argument("--rearm", action="store_true")
     p.add_argument("--note")
